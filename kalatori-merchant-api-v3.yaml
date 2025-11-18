@@ -1,0 +1,2156 @@
+openapi: 3.1.0
+info:
+  title: Kalatori Merchant API
+  version: 3.0.0
+  description: |
+    Kalatori Merchant API V3 - Self-hosted, non-custodial blockchain payment gateway for processing crypto payments on Polkadot's Asset Hub.
+
+    **Note:** This specification describes the API contract only. It defines what operations are available
+    and how to interact with the API, but does not document internal implementation details or server-side
+    processing logic. For implementation documentation, refer to the project's technical documentation.
+
+    ## Overview
+
+    This API allows merchants to:
+    - Create payment invoices for cryptocurrency payments
+    - Monitor invoice status and received payments
+    - Manage refunds
+    - Integrate with e-commerce platforms (WooCommerce, Shopify, Magento, etc.)
+
+    ## Authentication
+
+    All API requests require HMAC-SHA256 signature authentication using two headers:
+
+    ```
+    X-Kalatori-Signature: <hmac_sha256_hex_signature>
+    X-Kalatori-Timestamp: <unix_timestamp_seconds>
+    ```
+
+    **Signature Calculation:**
+
+    For POST/PATCH requests (with body):
+    ```
+    signed_payload = HTTP_METHOD + URL + body + timestamp
+    signature = HMAC_SHA256(secret, signed_payload)
+    ```
+
+    For GET requests (no body):
+    ```
+    signed_payload = HTTP_METHOD + URL + query_string + timestamp
+    signature = HMAC_SHA256(secret, signed_payload)
+    ```
+
+    Where:
+    - `HTTP_METHOD` = "GET", "POST", "PATCH", etc.
+    - `URL` = full path (e.g., "/v3/invoice")
+    - `body` = raw request body (empty string for GET)
+    - `query_string` = everything after "?" including the "?" (or empty string if no params)
+    - `timestamp` = value from X-Kalatori-Timestamp header (integer)
+
+    **Example (POST):**
+    ```javascript
+    const method = "POST";
+    const url = "/v3/invoice";
+    const body = '{"order_id":"order-123","amount":"100.00"}';
+    const timestamp = 1731585330;
+    const signedPayload = method + url + body + timestamp;
+    const signature = hmac_sha256(secret, signedPayload);
+    ```
+
+    **Example (GET):**
+    ```javascript
+    const method = "GET";
+    const url = "/v3/invoice";
+    const queryString = "?order_id=order-123";
+    const timestamp = 1731585330;
+    const signedPayload = method + url + queryString + timestamp;
+    const signature = hmac_sha256(secret, signedPayload);
+    ```
+
+    **Timestamp Validation:**
+    - Timestamp must be within ±5 minutes (300 seconds) of server time
+    - Prevents replay attacks
+    - Use constant-time comparison for signature verification
+
+    **HMAC Secret:**
+    - Configured in Kalatori config file
+    - Keep secret secure and never expose in client-side code
+
+    ## Response Structure
+
+    All responses follow a consistent structure:
+
+    **Success responses (2xx):**
+    ```
+    HTTP/1.1 200 OK
+    X-Request-Id: req_abc123xyz
+
+    {
+      "result": { /* response data */ }
+    }
+    ```
+
+    **Error responses (4xx/5xx):**
+    ```
+    HTTP/1.1 400 Bad Request
+    X-Request-Id: req_abc123xyz
+
+    {
+      "error": {
+        "type": "error_type",
+        "code": "error_code",
+        "message": "Human-readable error message",
+        "param": "parameter_name"
+      }
+    }
+    ```
+
+    **Request ID Header:**
+    - All responses include an `X-Request-Id` header
+    - Use this ID when contacting support or debugging issues
+    - Server logs include this ID for correlation
+
+    ## Idempotency
+
+    The API supports optional idempotency for safe retries of invoice creation. Include an `Idempotency-Key` header (UUID recommended) with your request:
+    ```
+    Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
+    ```
+
+    If the same idempotency key is used with identical parameters within 24 hours, the API returns the cached response. If used with different parameters, it returns a 409 Conflict error.
+
+    ## Webhooks
+
+    Webhook URL and events are configured in the daemon config file (not managed through this API).
+    All webhook payloads are signed using HMAC-SHA256.
+
+    **Webhook Signature Calculation:**
+    ```
+    signed_payload = event_type + webhook_url + json_body + timestamp
+    signature = HMAC_SHA256(secret, signed_payload)
+    ```
+
+    Headers sent with webhook requests:
+    - `X-Kalatori-Signature`: HMAC signature (hex)
+    - `X-Kalatori-Timestamp`: Unix timestamp in seconds (integer)
+
+    Verify timestamp is within ±5 minutes to prevent replay attacks.
+
+    **Webhook Events:**
+    - `invoice.created`, `invoice.waiting`, `invoice.partially_paid`
+    - `invoice.paid`, `invoice.overpaid`, `invoice.admin_approved`
+    - `invoice.unpaid_expired`, `invoice.partially_paid_expired`
+    - `invoice.customer_canceled`, `invoice.admin_canceled`
+    - `refund.waiting`, `refund.in_progress`, `refund.completed`, `refund.failed`
+  contact:
+    name: Kalatori Support
+    url: https://github.com/Kalapaja/kalatori
+  license:
+    name: GPLv3
+    url: https://www.gnu.org/licenses/gpl-3.0.html
+
+servers:
+  - url: http://localhost:16726
+    description: Local development server
+  - url: https://api.kalatori.example.com
+    description: Production server (example)
+
+security:
+  - HmacAuth: []
+
+tags:
+  - name: Invoices
+    description: Invoice creation, retrieval, and management operations
+  - name: Refunds
+    description: Refund initiation and tracking operations
+  - name: Transactions
+    description: Transaction retrieval and monitoring operations
+
+paths:
+  /v3/invoice:
+    get:
+      tags:
+        - Invoices
+      summary: Get invoice by ID
+      description: |
+        Retrieve a single invoice by invoice_id or order_id.
+        If both parameters are provided, invoice_id takes priority.
+        If neither parameter is provided, returns 400 error.
+      operationId: getInvoice
+      parameters:
+        - name: invoice_id
+          in: query
+          description: The Kalatori-generated invoice UUID
+          required: false
+          schema:
+            type: string
+            format: uuid
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        - name: order_id
+          in: query
+          description: The merchant's order ID
+          required: false
+          schema:
+            type: string
+            maxLength: 255
+          example: "shop-order-12345"
+        - name: include_transactions
+          in: query
+          description: Include incoming payment transactions in response (excludes refund and settlement transactions)
+          required: false
+          schema:
+            type: boolean
+            default: false
+        - name: include_refunds
+          in: query
+          description: Include full refund objects in response
+          required: false
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: Invoice retrieved successfully
+          headers:
+            X-Request-Id:
+              schema:
+                type: string
+              description: Unique request identifier for debugging
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - result
+                properties:
+                  result:
+                    $ref: '#/components/schemas/Invoice'
+              examples:
+                waiting:
+                  summary: Invoice waiting for payment
+                  value:
+                    result:
+                      id: "01234567-89ab-cdef-0123-456789abcdef"
+                      order_id: "shop-order-12345"
+                      amount: "100.50"
+                      asset: "USDC"
+                      status: "waiting"
+                      payment_address: "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
+                      payment_url: "https://mega-merchant.kalatori.org/01234567-89ab-cdef-0123-456789abcdef"
+                      valid_till: "2025-11-15T12:00:00.000Z"
+                      cart:
+                        - name: "Premium Widget"
+                          quantity: 2
+                          price: "45.00"
+                        - name: "Shipping"
+                          quantity: 1
+                          price: "10.50"
+                      callback_url: "https://myshop.com/webhooks/kalatori"
+                      total_received: "0.00"
+                      refunds_ids: []
+                      transactions: []
+                      created_at: "2025-11-14T12:00:00.000Z"
+                      updated_at: "2025-11-14T12:00:00.000Z"
+                paid:
+                  summary: Invoice paid
+                  value:
+                    result:
+                      id: "01234567-89ab-cdef-0123-456789abcdef"
+                      order_id: "shop-order-12345"
+                      amount: "100.50"
+                      asset: "USDC"
+                      status: "paid"
+                      payment_address: "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
+                      payment_url: "https://mega-merchant.kalatori.org/01234567-89ab-cdef-0123-456789abcdef"
+                      valid_till: "2025-11-15T12:00:00.000Z"
+                      cart:
+                        - name: "Premium Widget"
+                          quantity: 2
+                          price: "45.00"
+                        - name: "Shipping"
+                          quantity: 1
+                          price: "10.50"
+                      callback_url: "https://myshop.com/webhooks/kalatori"
+                      total_received: "100.50"
+                      refunds_ids: []
+                      created_at: "2025-11-14T12:00:00.000Z"
+                      updated_at: "2025-11-14T12:15:30.000Z"
+        '400':
+          description: Invalid request parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                missing_param:
+                  summary: Missing required parameter
+                  value:
+                    error:
+                      type: "invalid_request_error"
+                      code: "missing_parameter"
+                      message: "Either invoice_id or order_id must be provided"
+                multiple_params:
+                  summary: Multiple parameters provided
+                  value:
+                    error:
+                      type: "invalid_request_error"
+                      code: "too_many_parameters"
+                      message: "Only one of invoice_id or order_id can be specified"
+                invalid_uuid:
+                  summary: Malformed UUID
+                  value:
+                    error:
+                      type: "invalid_request_error"
+                      code: "invalid_parameter"
+                      message: "invoice_id must be a valid UUID"
+                      param: "invoice_id"
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '404':
+          description: Invoice not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  type: "invalid_request_error"
+                  code: "invoice_not_found"
+                  message: "No invoice found with the provided ID"
+                  param: "invoice_id"
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+    post:
+      tags:
+        - Invoices
+      summary: Create new invoice
+      description: |
+        Create a new payment invoice. The invoice_id (UUID) is generated by Kalatori, while order_id is provided by the merchant.
+
+        **Idempotency:** Include an `Idempotency-Key` header to safely retry requests.
+
+        **Validation:**
+        - Amount must be >= existential deposit (typically 0.07 for most assets)
+        - No other invoice with the same order_id can exist (order_id must be globally unique)
+      operationId: createInvoice
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateInvoiceRequest'
+            examples:
+              minimal:
+                summary: Minimal invoice creation
+                value:
+                  order_id: "shop-order-12345"
+                  amount: "100.50"
+              with_cart:
+                summary: Invoice with cart items (including optional fields)
+                value:
+                  order_id: "shop-order-12346"
+                  amount: "250.00"
+                  cart:
+                    - name: "Premium Widget"
+                      quantity: 2
+                      price: "100.00"
+                      sku: "WGT-PREM-001"
+                      product_id: "prod_abc123"
+                      variant_id: "var_blue_large"
+                      image_url: "https://myshop.com/images/premium-widget.jpg"
+                      tax: "20.00"
+                      discount: "10.00"
+                    - name: "Standard Widget"
+                      quantity: 5
+                      price: "10.00"
+                      sku: "WGT-STD-002"
+                      product_id: "prod_xyz789"
+                  callback_url: "https://myshop.com/webhooks/kalatori"
+      responses:
+        '201':
+          description: Invoice created successfully
+          headers:
+            X-Request-Id:
+              schema:
+                type: string
+              description: Unique request identifier
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - result
+                properties:
+                  result:
+                    $ref: '#/components/schemas/Invoice'
+              example:
+                result:
+                  id: "01234567-89ab-cdef-0123-456789abcdef"
+                  order_id: "shop-order-12345"
+                  amount: "100.50"
+                  asset: "USDC"
+                  status: "waiting"
+                  payment_address: "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
+                  payment_url: "https://mega-merchant.kalatori.org/01234567-89ab-cdef-0123-456789abcdef"
+                  valid_till: "2025-11-15T12:00:00.000Z"
+                  cart:
+                    - name: "Premium Widget"
+                      quantity: 2
+                      price: "45.00"
+                      sku: "WGT-PREM-001"
+                      product_id: "prod_abc123"
+                      image_url: "https://myshop.com/images/premium-widget.jpg"
+                      tax: "4.50"
+                    - name: "Shipping"
+                      quantity: 1
+                      price: "10.50"
+                  callback_url: "https://myshop.com/webhooks/kalatori"
+                  total_received: "0.00"
+                  refunds_ids: []
+                  transactions: []
+                  created_at: "2025-11-14T12:00:00.000Z"
+                  updated_at: "2025-11-14T12:00:00.000Z"
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                amount_too_low:
+                  summary: Amount below existential deposit
+                  value:
+                    error:
+                      type: "invalid_request_error"
+                      code: "amount_too_low"
+                      message: "Amount must be at least 0.07 USDC to cover existential deposit"
+                      param: "amount"
+                validation_failed:
+                  summary: Multiple validation errors
+                  value:
+                    error:
+                      type: "invalid_request_error"
+                      code: "validation_failed"
+                      message: "Request validation failed"
+                      validation_errors:
+                        - param: "order_id"
+                          message: "order_id cannot be empty"
+                        - param: "amount"
+                          message: "amount must be a positive number"
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '409':
+          description: Conflict - duplicate order_id or idempotency key mismatch
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                duplicate_order:
+                  summary: Order ID already exists
+                  value:
+                    error:
+                      type: "invalid_request_error"
+                      code: "duplicate_order_id"
+                      message: "An invoice with order_id 'shop-order-12345' already exists"
+                      param: "order_id"
+                      details:
+                        existing_invoice_id: "fedcba98-7654-3210-fedc-ba9876543210"
+                        existing_status: "waiting"
+                idempotency_mismatch:
+                  summary: Idempotency key used with different parameters
+                  value:
+                    error:
+                      type: "idempotency_error"
+                      code: "idempotency_key_mismatch"
+                      message: "Idempotency key was previously used with different request parameters"
+                      param: "idempotency_key"
+                      details:
+                        original_request_at: "2025-11-14T12:00:00.000Z"
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /v3/invoices:
+    get:
+      tags:
+        - Invoices
+      summary: List invoices
+      description: |
+        Retrieve a paginated list of invoices with optional filtering and sorting.
+
+        **Pagination:** Uses cursor-based pagination with `limit` and `starting_after` parameters.
+
+        **Filtering:** Filter by status, date range, order_id, amount range, and asset.
+      operationId: listInvoices
+      parameters:
+        - name: status
+          in: query
+          description: Filter by invoice status
+          required: false
+          schema:
+            $ref: '#/components/schemas/InvoiceStatus'
+        - name: order_id
+          in: query
+          description: Filter by merchant order ID
+          required: false
+          schema:
+            type: string
+            maxLength: 255
+        - name: created_after
+          in: query
+          description: Filter invoices created after this timestamp (ISO 8601)
+          required: false
+          schema:
+            type: string
+            format: date-time
+          example: "2025-11-01T00:00:00.000Z"
+        - name: created_before
+          in: query
+          description: |
+            Filter invoices created before this timestamp (ISO 8601 UTC).
+            If both created_after and created_before provided, created_after must be earlier.
+          required: false
+          schema:
+            type: string
+            format: date-time
+          example: "2025-11-30T23:59:59.999Z"
+        - name: amount_gte
+          in: query
+          description: Filter invoices with amount greater than or equal to this value
+          required: false
+          schema:
+            type: string
+            pattern: '^\d+(\.\d+)?$'
+          example: "10.00"
+        - name: amount_lte
+          in: query
+          description: |
+            Filter invoices with amount less than or equal to this value.
+            If both amount_gte and amount_lte provided, amount_gte must be <= amount_lte.
+          required: false
+          schema:
+            type: string
+            pattern: '^\d+(\.\d+)?$'
+          example: "1000.00"
+        - name: asset
+          in: query
+          description: Filter by asset symbol
+          required: false
+          schema:
+            type: string
+          example: "USDC"
+        - name: limit
+          in: query
+          description: Maximum number of invoices to return (1-100)
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: starting_after
+          in: query
+          description: |
+            Cursor for pagination. Use the next_cursor value from previous response.
+            Cursors are opaque strings. Changing sort order invalidates existing cursors.
+          required: false
+          schema:
+            type: string
+          example: "inv_xyz789"
+        - name: sort
+          in: query
+          description: Sort order
+          required: false
+          schema:
+            type: string
+            enum:
+              - created_at:asc
+              - created_at:desc
+              - updated_at:asc
+              - updated_at:desc
+              - amount:asc
+              - amount:desc
+            default: created_at:desc
+        - name: include_transactions
+          in: query
+          description: Include incoming payment transactions for each invoice in response (excludes refund and settlement transactions)
+          required: false
+          schema:
+            type: boolean
+            default: false
+        - name: include_refunds
+          in: query
+          description: Include full refund objects for each invoice in response
+          required: false
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: List of invoices retrieved successfully
+          headers:
+            X-Request-Id:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - result
+                properties:
+                  result:
+                    $ref: '#/components/schemas/InvoiceList'
+              example:
+                result:
+                  data:
+                    - id: "01234567-89ab-cdef-0123-456789abcdef"
+                      order_id: "shop-order-12345"
+                      amount: "100.50"
+                      asset: "USDC"
+                      status: "paid"
+                      payment_address: "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
+                      payment_url: "https://mega-merchant.kalatori.org/01234567-89ab-cdef-0123-456789abcdef"
+                      valid_till: "2025-11-15T12:00:00.000Z"
+                      total_received: "100.50"
+                      refunds_ids: []
+                      created_at: "2025-11-14T12:00:00.000Z"
+                      updated_at: "2025-11-14T12:15:30.000Z"
+                    - id: "fedcba98-7654-3210-fedc-ba9876543210"
+                      order_id: "shop-order-12344"
+                      amount: "50.00"
+                      asset: "USDC"
+                      status: "paid"
+                      payment_address: "5DTestGXxxbXG6QL4N7KkeYmJRRkuLwPmLPJ8oRXTrqwJGqf"
+                      payment_url: "https://mega-merchant.kalatori.org/fedcba98-7654-3210-fedc-ba9876543210"
+                      valid_till: "2025-11-14T11:30:00.000Z"
+                      total_received: "50.00"
+                      refunds_ids: []
+                      created_at: "2025-11-14T11:00:00.000Z"
+                      updated_at: "2025-11-14T11:15:00.000Z"
+                  has_more: true
+                  next_cursor: "inv_xyz789"
+        '400':
+          description: Invalid query parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /v3/invoice/update:
+    post:
+      tags:
+        - Invoices
+      summary: Update invoice
+      description: |
+        Update an invoice. Only invoices in `waiting` status can be updated.
+
+        **Updateable fields:**
+        - `callback_url` - Webhook URL
+        - `amount` - Payment amount
+        - `cart` - Cart items
+
+        **Note:** The `valid_till` field is automatically updated on each update request.
+      operationId: updateInvoice
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateInvoiceRequest'
+            example:
+              invoice_id: "01234567-89ab-cdef-0123-456789abcdef"
+              callback_url: "https://newshop.com/webhooks/kalatori"
+              amount: "120.00"
+              cart:
+                - name: "Premium Widget"
+                  quantity: 3
+                  price: "40.00"
+      responses:
+        '200':
+          description: Invoice updated successfully
+          headers:
+            X-Request-Id:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - result
+                properties:
+                  result:
+                    $ref: '#/components/schemas/Invoice'
+        '400':
+          description: Invalid request or invoice cannot be updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                invalid_status:
+                  summary: Invoice not in waiting status
+                  value:
+                    error:
+                      type: "invalid_request_error"
+                      code: "invalid_invoice_status"
+                      message: "Only invoices with 'waiting' status can be updated. Current status: paid"
+                      param: "invoice_id"
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '404':
+          description: Invoice not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /v3/invoice/cancel:
+    post:
+      tags:
+        - Invoices
+      summary: Cancel invoice
+      description: |
+        Cancel an invoice. If the invoice has received partial payment, a refund will be automatically initiated.
+
+        **Valid statuses for cancellation:**
+        - `waiting` - No refund needed
+        - `partially_paid` - Automatic refund initiated
+      operationId: cancelInvoice
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelInvoiceRequest'
+            example:
+              invoice_id: "01234567-89ab-cdef-0123-456789abcdef"
+              reason: "customer_request"
+      responses:
+        '200':
+          description: Invoice canceled successfully
+          headers:
+            X-Request-Id:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - result
+                properties:
+                  result:
+                    $ref: '#/components/schemas/Invoice'
+              example:
+                result:
+                  id: "01234567-89ab-cdef-0123-456789abcdef"
+                  order_id: "shop-order-12345"
+                  status: "admin_canceled"
+                  amount: "100.50"
+                  asset: "USDC"
+                  payment_address: "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
+                  payment_url: "https://mega-merchant.kalatori.org/01234567-89ab-cdef-0123-456789abcdef"
+                  valid_till: "2025-11-15T12:00:00.000Z"
+                  total_received: "0.00"
+                  refunds_ids: []
+                  transactions: []
+                  created_at: "2025-11-14T12:00:00.000Z"
+                  updated_at: "2025-11-14T13:00:00.000Z"
+        '400':
+          description: Invoice cannot be canceled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                already_paid:
+                  summary: Invoice already paid
+                  value:
+                    error:
+                      type: "invalid_request_error"
+                      code: "invalid_invoice_status"
+                      message: "Cannot cancel invoice with status 'paid'"
+                      param: "invoice_id"
+                already_canceled:
+                  summary: Invoice already canceled
+                  value:
+                    error:
+                      type: "invalid_request_error"
+                      code: "invalid_invoice_status"
+                      message: "Invoice is already canceled"
+                      param: "invoice_id"
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '404':
+          description: Invoice not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /v3/invoice/approve:
+    post:
+      tags:
+        - Invoices
+      summary: Admin approve invoice
+      description: |
+        Manually approve an invoice regardless of payment status. Typically used for:
+        - Accepting underpaid invoices
+        - Handling off-chain payment arrangements
+        - Resolving payment disputes
+
+        Note: All authenticated users can perform this operation in V3.
+      operationId: approveInvoice
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApproveInvoiceRequest'
+            example:
+              invoice_id: "01234567-89ab-cdef-0123-456789abcdef"
+      responses:
+        '200':
+          description: Invoice approved successfully
+          headers:
+            X-Request-Id:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - result
+                properties:
+                  result:
+                    $ref: '#/components/schemas/Invoice'
+              example:
+                result:
+                  id: "01234567-89ab-cdef-0123-456789abcdef"
+                  order_id: "shop-order-12345"
+                  status: "admin_approved"
+                  amount: "100.50"
+                  asset: "USDC"
+                  payment_address: "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
+                  payment_url: "https://mega-merchant.kalatori.org/01234567-89ab-cdef-0123-456789abcdef"
+                  valid_till: "2025-11-15T12:00:00.000Z"
+                  total_received: "95.00"
+                  refunds_ids: []
+                  created_at: "2025-11-14T12:00:00.000Z"
+                  updated_at: "2025-11-14T13:30:00.000Z"
+        '400':
+          description: Invoice cannot be approved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '404':
+          description: Invoice not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /v3/refund:
+    get:
+      tags:
+        - Refunds
+      summary: Get refund by ID
+      description: Retrieve details of a specific refund
+      operationId: getRefund
+      parameters:
+        - name: refund_id
+          in: query
+          description: The refund UUID
+          required: true
+          schema:
+            type: string
+            format: uuid
+          example: "11111111-2222-3333-4444-555555555555"
+        - name: include_transactions
+          in: query
+          description: Include transaction history in response
+          required: false
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: Refund retrieved successfully
+          headers:
+            X-Request-Id:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - result
+                properties:
+                  result:
+                    $ref: '#/components/schemas/Refund'
+              example:
+                result:
+                  id: "11111111-2222-3333-4444-555555555555"
+                  invoice_id: "01234567-89ab-cdef-0123-456789abcdef"
+                  amount: "10.00"
+                  asset: "USDC"
+                  source_address: "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
+                  destination_address: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
+                  status: "completed"
+                  initiator_type: "admin"
+                  created_at: "2025-11-14T13:00:00.000Z"
+                  updated_at: "2025-11-14T13:05:00.000Z"
+        '400':
+          description: Missing or invalid refund_id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '404':
+          description: Refund not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+    post:
+      tags:
+        - Refunds
+      summary: Initiate refund
+      description: |
+        Create a refund for an invoice. Refunds can be partial (specific amount) or full.
+
+        **Auto-refund behavior:**
+        - If `destination_address` is not provided, the refund will be automatically sent to
+          the sender address from the invoice's transaction history.
+        - If the invoice has no transaction history (no payments received), the request will fail.
+        - Manual destination address can be specified to override auto-refund behavior.
+
+        **Refund sources:**
+        - Payment address (if funds still present)
+        - Reserve account (if payment address is empty)
+
+        **Requirements:**
+        - Invoice must exist
+        - Amount must be specified and available
+        - If destination_address not provided, invoice must have transaction history
+      operationId: initiateRefund
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRefundRequest'
+            examples:
+              manual_destination:
+                summary: Refund with manual destination address
+                value:
+                  invoice_id: "01234567-89ab-cdef-0123-456789abcdef"
+                  amount: "10.00"
+                  destination_address: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
+              auto_refund:
+                summary: Auto-refund to sender (no destination specified)
+                value:
+                  invoice_id: "01234567-89ab-cdef-0123-456789abcdef"
+                  amount: "10.00"
+      responses:
+        '201':
+          description: Refund initiated successfully
+          headers:
+            X-Request-Id:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - result
+                properties:
+                  result:
+                    $ref: '#/components/schemas/Refund'
+              example:
+                result:
+                  id: "11111111-2222-3333-4444-555555555555"
+                  invoice_id: "01234567-89ab-cdef-0123-456789abcdef"
+                  amount: "10.00"
+                  asset: "USDC"
+                  source_address: "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
+                  destination_address: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
+                  status: "waiting"
+                  initiator_type: "admin"
+                  created_at: "2025-11-14T13:00:00.000Z"
+                  updated_at: "2025-11-14T13:00:00.000Z"
+        '400':
+          description: Invalid refund request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                insufficient_balance:
+                  summary: Insufficient balance for refund
+                  value:
+                    error:
+                      type: "invalid_request_error"
+                      code: "insufficient_balance"
+                      message: "Payment address balance (5.00 USDC) is less than refund amount (10.00 USDC)"
+                      param: "amount"
+                invalid_address:
+                  summary: Invalid destination address
+                  value:
+                    error:
+                      type: "invalid_request_error"
+                      code: "invalid_address"
+                      message: "Destination address is not a valid Substrate address"
+                      param: "destination_address"
+                invalid_invoice_status:
+                  summary: Cannot refund canceled invoice
+                  value:
+                    error:
+                      type: "invalid_request_error"
+                      code: "invalid_invoice_status"
+                      message: "Cannot create refund for invoice with status 'admin_canceled'"
+                      param: "invoice_id"
+                auto_refund_no_sender:
+                  summary: Auto-refund failed - no transaction history
+                  value:
+                    error:
+                      type: "invalid_request_error"
+                      code: "missing_sender_address"
+                      message: "Cannot auto-refund: invoice has no transaction history. Please provide destination_address."
+                      param: "destination_address"
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '404':
+          description: Invoice not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /v3/refunds:
+    get:
+      tags:
+        - Refunds
+      summary: List refunds
+      description: |
+        Retrieve a paginated list of refunds with optional filtering and sorting.
+
+        **Pagination:** Uses cursor-based pagination with `limit` and `starting_after` parameters.
+
+        **Filtering:** Filter by invoice, status, date range, and amount range.
+      operationId: listRefunds
+      parameters:
+        - name: invoice_id
+          in: query
+          description: Filter refunds by invoice UUID
+          required: false
+          schema:
+            type: string
+            format: uuid
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        - name: status
+          in: query
+          description: Filter by refund status
+          required: false
+          schema:
+            $ref: '#/components/schemas/RefundStatus'
+        - name: created_after
+          in: query
+          description: Filter refunds created after this timestamp (ISO 8601)
+          required: false
+          schema:
+            type: string
+            format: date-time
+          example: "2025-11-01T00:00:00.000Z"
+        - name: created_before
+          in: query
+          description: |
+            Filter refunds created before this timestamp (ISO 8601 UTC).
+            If both created_after and created_before provided, created_after must be earlier.
+          required: false
+          schema:
+            type: string
+            format: date-time
+          example: "2025-11-30T23:59:59.999Z"
+        - name: amount_gte
+          in: query
+          description: Filter refunds with amount greater than or equal to this value
+          required: false
+          schema:
+            type: string
+            pattern: '^\d+(\.\d+)?$'
+          example: "10.00"
+        - name: amount_lte
+          in: query
+          description: |
+            Filter refunds with amount less than or equal to this value.
+            If both amount_gte and amount_lte provided, amount_gte must be <= amount_lte.
+          required: false
+          schema:
+            type: string
+            pattern: '^\d+(\.\d+)?$'
+          example: "1000.00"
+        - name: limit
+          in: query
+          description: Maximum number of refunds to return (1-100)
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: starting_after
+          in: query
+          description: |
+            Cursor for pagination. Use the next_cursor value from previous response.
+            Cursors are opaque strings. Changing sort order invalidates existing cursors.
+          required: false
+          schema:
+            type: string
+          example: "ref_xyz789"
+        - name: sort
+          in: query
+          description: Sort order
+          required: false
+          schema:
+            type: string
+            enum:
+              - created_at:asc
+              - created_at:desc
+              - updated_at:asc
+              - updated_at:desc
+              - amount:asc
+              - amount:desc
+            default: created_at:desc
+        - name: include_transactions
+          in: query
+          description: Include transaction history for each refund in response
+          required: false
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: List of refunds retrieved successfully
+          headers:
+            X-Request-Id:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - result
+                properties:
+                  result:
+                    $ref: '#/components/schemas/RefundList'
+              example:
+                result:
+                  data:
+                    - id: "11111111-2222-3333-4444-555555555555"
+                      invoice_id: "01234567-89ab-cdef-0123-456789abcdef"
+                      amount: "10.00"
+                      asset: "USDC"
+                      source_address: "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
+                      destination_address: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
+                      status: "completed"
+                      initiator_type: "system"
+                      created_at: "2025-11-14T13:00:00.000Z"
+                      updated_at: "2025-11-14T13:05:00.000Z"
+                    - id: "22222222-3333-4444-5555-666666666666"
+                      invoice_id: "fedcba98-7654-3210-fedc-ba9876543210"
+                      amount: "5.00"
+                      asset: "USDC"
+                      source_address: "5DTestGXxxbXG6QL4N7KkeYmJRRkuLwPmLPJ8oRXTrqwJGqf"
+                      destination_address: "5HpG9w8EBLe5XCrbczpwq5TSXvedjrBGCwqxK1iQ7qUsSWFc"
+                      status: "completed"
+                      initiator_type: "admin"
+                      created_at: "2025-11-14T14:00:00.000Z"
+                      updated_at: "2025-11-14T14:05:00.000Z"
+                  has_more: false
+        '400':
+          description: Invalid query parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /v3/transaction:
+    get:
+      tags:
+        - Transactions
+      summary: Get transaction by ID
+      description: |
+        Retrieve a single transaction by its unique identifier.
+      operationId: getTransaction
+      parameters:
+        - name: id
+          in: query
+          description: Transaction UUID
+          required: true
+          schema:
+            type: string
+            format: uuid
+          example: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+      responses:
+        '200':
+          description: Transaction retrieved successfully
+          headers:
+            X-Request-Id:
+              schema:
+                type: string
+              description: Unique request identifier for debugging
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - result
+                properties:
+                  result:
+                    $ref: '#/components/schemas/Transaction'
+              example:
+                result:
+                  id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+                  tx_hash: "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+                  block_number: 1234567
+                  amount: "100.50"
+                  sender_address: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
+                  recipient_address: "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
+                  timestamp: "2025-11-14T12:10:00.000Z"
+                  status: "Completed"
+                  transaction_link: "https://assethub-polkadot.subscan.io/extrinsic/0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+        '400':
+          description: Missing or invalid transaction ID
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                missing_id:
+                  summary: Missing ID parameter
+                  value:
+                    error:
+                      type: "invalid_request_error"
+                      code: "missing_parameter"
+                      message: "id parameter is required"
+                      param: "id"
+                invalid_uuid:
+                  summary: Malformed UUID
+                  value:
+                    error:
+                      type: "invalid_request_error"
+                      code: "invalid_parameter"
+                      message: "id must be a valid UUID"
+                      param: "id"
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '404':
+          description: Transaction not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  type: "invalid_request_error"
+                  code: "transaction_not_found"
+                  message: "No transaction found with the provided ID"
+                  param: "id"
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /v3/transactions:
+    get:
+      tags:
+        - Transactions
+      summary: List transactions
+      description: |
+        Retrieve a paginated list of transactions with optional filtering and sorting.
+
+        **Pagination:** Uses cursor-based pagination with `limit` and `starting_after` parameters.
+
+        **Filtering:** Filter by status, date range, amount range, addresses, and related invoice/refund.
+      operationId: listTransactions
+      parameters:
+        - name: status
+          in: query
+          description: Filter by transaction status
+          required: false
+          schema:
+            type: string
+            enum:
+              - Waiting
+              - InProgress
+              - Completed
+              - Failed
+        - name: created_after
+          in: query
+          description: Filter transactions created after this timestamp (ISO 8601)
+          required: false
+          schema:
+            type: string
+            format: date-time
+          example: "2025-11-01T00:00:00.000Z"
+        - name: created_before
+          in: query
+          description: |
+            Filter transactions created before this timestamp (ISO 8601 UTC).
+            If both created_after and created_before provided, created_after must be earlier.
+          required: false
+          schema:
+            type: string
+            format: date-time
+          example: "2025-11-30T23:59:59.999Z"
+        - name: amount_gte
+          in: query
+          description: Filter transactions with amount greater than or equal to this value
+          required: false
+          schema:
+            type: string
+            pattern: '^\d+(\.\d+)?$'
+          example: "10.00"
+        - name: amount_lte
+          in: query
+          description: |
+            Filter transactions with amount less than or equal to this value.
+            If both amount_gte and amount_lte provided, amount_gte must be <= amount_lte.
+          required: false
+          schema:
+            type: string
+            pattern: '^\d+(\.\d+)?$'
+          example: "1000.00"
+        - name: sender_address
+          in: query
+          description: Filter by sender address (Substrate ss58 format)
+          required: false
+          schema:
+            type: string
+          example: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
+        - name: recipient_address
+          in: query
+          description: Filter by recipient address (Substrate ss58 format)
+          required: false
+          schema:
+            type: string
+          example: "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
+        - name: invoice_id
+          in: query
+          description: Filter transactions by associated invoice UUID
+          required: false
+          schema:
+            type: string
+            format: uuid
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        - name: refund_id
+          in: query
+          description: Filter transactions by associated refund UUID
+          required: false
+          schema:
+            type: string
+            format: uuid
+          example: "11111111-2222-3333-4444-555555555555"
+        - name: limit
+          in: query
+          description: Maximum number of transactions to return (1-100)
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: starting_after
+          in: query
+          description: |
+            Cursor for pagination. Use the next_cursor value from previous response.
+            Cursors are opaque strings. Changing sort order invalidates existing cursors.
+          required: false
+          schema:
+            type: string
+          example: "txn_xyz789"
+        - name: sort
+          in: query
+          description: Sort order
+          required: false
+          schema:
+            type: string
+            enum:
+              - timestamp:asc
+              - timestamp:desc
+              - amount:asc
+              - amount:desc
+              - block_number:asc
+              - block_number:desc
+            default: timestamp:desc
+      responses:
+        '200':
+          description: List of transactions retrieved successfully
+          headers:
+            X-Request-Id:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - result
+                properties:
+                  result:
+                    $ref: '#/components/schemas/TransactionList'
+              example:
+                result:
+                  data:
+                    - id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+                      tx_hash: "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+                      block_number: 1234567
+                      amount: "100.50"
+                      sender_address: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
+                      recipient_address: "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
+                      timestamp: "2025-11-14T12:10:00.000Z"
+                      status: "Completed"
+                      transaction_link: "https://assethub-polkadot.subscan.io/extrinsic/0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+                    - id: "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
+                      tx_hash: "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+                      block_number: 1234560
+                      amount: "50.25"
+                      sender_address: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
+                      recipient_address: "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
+                      timestamp: "2025-11-14T11:00:00.000Z"
+                      status: "Completed"
+                      transaction_link: "https://assethub-polkadot.subscan.io/extrinsic/0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+                  has_more: true
+                  next_cursor: "txn_xyz789"
+        '400':
+          description: Invalid query parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+components:
+  securitySchemes:
+    HmacAuth:
+      type: apiKey
+      in: header
+      name: X-Kalatori-Signature
+      description: |
+        HMAC-SHA256 signature authentication.
+
+        Required headers:
+        - `X-Kalatori-Signature`: HMAC-SHA256 hex signature
+        - `X-Kalatori-Timestamp`: Unix timestamp in seconds (integer)
+
+        **Signature Calculation:**
+
+        POST/PATCH (with body):
+        ```
+        signed_payload = HTTP_METHOD + URL + body + timestamp
+        signature = HMAC_SHA256(secret, signed_payload)
+        ```
+
+        GET (no body):
+        ```
+        signed_payload = HTTP_METHOD + URL + query_string + timestamp
+        signature = HMAC_SHA256(secret, signed_payload)
+        ```
+
+        **Validation:**
+        - Timestamp must be within ±5 minutes of server time
+        - Use constant-time comparison for signature verification
+        - HMAC secret configured in Kalatori config file
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      description: |
+        Optional idempotency key for safe request retries (UUID recommended).
+        Keys are valid for 24 hours.
+
+        If the same key is used within 24 hours:
+        - With identical parameters: returns cached response
+        - With different parameters: returns 409 Conflict error
+      required: false
+      schema:
+        type: string
+        format: uuid
+      example: "550e8400-e29b-41d4-a716-446655440000"
+
+  schemas:
+    Invoice:
+      type: object
+      required:
+        - id
+        - order_id
+        - amount
+        - asset
+        - status
+        - payment_address
+        - payment_url
+        - valid_till
+        - total_received
+        - refunds_ids
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Kalatori-generated invoice UUID
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        order_id:
+          type: string
+          maxLength: 255
+          description: Merchant's order identifier
+          example: "shop-order-12345"
+        amount:
+          type: string
+          pattern: '^\d+(\.\d+)?$'
+          description: Expected payment amount (decimal string for precision)
+          example: "100.50"
+        asset:
+          type: string
+          description: Asset symbol (e.g., USDC, USDT, DOT)
+          example: "USDC"
+        status:
+          $ref: '#/components/schemas/InvoiceStatus'
+        payment_address:
+          type: string
+          description: Unique payment address for this invoice (Substrate ss58 format)
+          example: "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
+        payment_url:
+          type: string
+          format: uri
+          description: |
+            URL to Kalatori-hosted payment page for this invoice.
+            Customers can use this page to complete payment with wallet integrations.
+            This URL is only valid until valid_till expiration time.
+          example: "https://mega-merchant.kalatori.org/01234567-89ab-cdef-0123-456789abcdef"
+        valid_till:
+          type: string
+          format: date-time
+          description: |
+            Invoice expiration timestamp (ISO 8601 UTC).
+            Calculated as current_time + configured invoice lifetime on creation.
+            Updating an invoice refreshes valid_till to now + invoice lifetime.
+            After expiration, payment address stops accepting payments.
+          example: "2025-11-15T12:00:00.000Z"
+        cart:
+          type: array
+          items:
+            $ref: '#/components/schemas/CartItem'
+          description: Optional cart items for display on payment page
+        callback_url:
+          type: string
+          format: uri
+          description: Optional webhook URL for payment notifications
+          example: "https://myshop.com/webhooks/kalatori"
+        total_received:
+          type: string
+          pattern: '^\d+(\.\d+)?$'
+          description: Total amount received so far
+          example: "100.50"
+        refunds_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: List of refund UUIDs associated with this invoice. Empty array if no refunds exist.
+          example: []
+        refunds:
+          type: array
+          items:
+            $ref: '#/components/schemas/Refund'
+          description: |
+            Optional list of full refund objects associated with this invoice.
+            Only included when `include_refunds=true` is requested (query parameter for GET, request body field for POST/PATCH).
+            Provides complete refund details without additional API calls.
+        transactions:
+          type: array
+          items:
+            $ref: '#/components/schemas/Transaction'
+          description: |
+            Optional list of incoming payment transactions received for this invoice.
+            Only included when `include_transactions=true` is requested (query parameter for GET, request body field for POST/PATCH).
+            Excludes refund and settlement transactions. Useful for payment verification and proof of payment.
+        created_at:
+          type: string
+          format: date-time
+          description: Invoice creation timestamp
+          example: "2025-11-14T12:00:00.000Z"
+        updated_at:
+          type: string
+          format: date-time
+          description: Last update timestamp
+          example: "2025-11-14T12:15:30.000Z"
+
+    InvoiceList:
+      type: object
+      required:
+        - data
+        - has_more
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Invoice'
+          description: Array of invoice objects
+        has_more:
+          type: boolean
+          description: Whether more results exist beyond this page
+          example: true
+        next_cursor:
+          type: string
+          description: Cursor for fetching the next page (only present when has_more is true)
+          example: "inv_xyz789"
+
+    RefundList:
+      type: object
+      required:
+        - data
+        - has_more
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Refund'
+          description: Array of refund objects
+        has_more:
+          type: boolean
+          description: Whether more results exist beyond this page
+          example: false
+        next_cursor:
+          type: string
+          description: Cursor for fetching the next page (only present when has_more is true)
+          example: "ref_xyz789"
+
+    TransactionList:
+      type: object
+      required:
+        - data
+        - has_more
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Transaction'
+          description: Array of transaction objects
+        has_more:
+          type: boolean
+          description: Whether more results exist beyond this page
+          example: true
+        next_cursor:
+          type: string
+          description: Cursor for fetching the next page (only present when has_more is true)
+          example: "txn_xyz789"
+
+    CreateInvoiceRequest:
+      type: object
+      required:
+        - order_id
+        - amount
+      properties:
+        order_id:
+          type: string
+          maxLength: 255
+          minLength: 1
+          description: Merchant's unique order identifier
+          example: "shop-order-12345"
+        amount:
+          type: string
+          pattern: '^\d+(\.\d+)?$'
+          description: Payment amount (must be >= existential deposit)
+          example: "100.50"
+        cart:
+          type: array
+          items:
+            $ref: '#/components/schemas/CartItem'
+          description: Optional cart items for payment page display
+        callback_url:
+          type: string
+          format: uri
+          description: Optional webhook URL for payment notifications
+          example: "https://myshop.com/webhooks/kalatori"
+        include_transactions:
+          type: boolean
+          default: false
+          description: Include incoming payment transactions in response (excludes refund and settlement transactions)
+        include_refunds:
+          type: boolean
+          default: false
+          description: Include full refund objects in response
+      description: |
+        Create invoice request.
+
+        Note: The asset type (USDC, USDT, DOT, etc.) is configured per daemon instance.
+        All invoices use the configured asset. Contact your daemon administrator if you
+        need to accept payments in different assets.
+
+    UpdateInvoiceRequest:
+      type: object
+      required:
+        - invoice_id
+      properties:
+        invoice_id:
+          type: string
+          format: uuid
+          description: Invoice UUID to update
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        amount:
+          type: string
+          pattern: '^\d+(\.\d+)?$'
+          description: New payment amount
+          example: "120.00"
+        cart:
+          type: array
+          items:
+            $ref: '#/components/schemas/CartItem'
+          description: Updated cart items
+        callback_url:
+          type: string
+          format: uri
+          description: New webhook URL
+          example: "https://newshop.com/webhooks/kalatori"
+        include_transactions:
+          type: boolean
+          default: false
+          description: Include incoming payment transactions in response (excludes refund and settlement transactions)
+        include_refunds:
+          type: boolean
+          default: false
+          description: Include full refund objects in response
+
+    CancelInvoiceRequest:
+      type: object
+      required:
+        - invoice_id
+      properties:
+        invoice_id:
+          type: string
+          format: uuid
+          description: Invoice UUID to cancel
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        reason:
+          type: string
+          maxLength: 500
+          description: Optional cancellation reason
+          example: "customer_request"
+        include_transactions:
+          type: boolean
+          default: false
+          description: Include incoming payment transactions in response (excludes refund and settlement transactions)
+        include_refunds:
+          type: boolean
+          default: false
+          description: Include full refund objects in response
+
+    ApproveInvoiceRequest:
+      type: object
+      required:
+        - invoice_id
+      properties:
+        invoice_id:
+          type: string
+          format: uuid
+          description: Invoice UUID to approve
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        include_transactions:
+          type: boolean
+          default: false
+          description: Include incoming payment transactions in response (excludes refund and settlement transactions)
+        include_refunds:
+          type: boolean
+          default: false
+          description: Include full refund objects in response
+
+    CreateRefundRequest:
+      type: object
+      required:
+        - invoice_id
+        - amount
+      properties:
+        invoice_id:
+          type: string
+          format: uuid
+          description: Invoice UUID to refund
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        amount:
+          type: string
+          pattern: '^\d+(\.\d+)?$'
+          description: Refund amount
+          example: "10.00"
+        destination_address:
+          type: string
+          description: |
+            Optional recipient address for refund (Substrate ss58 format).
+            If not provided, the refund will be automatically sent to the sender address
+            from the invoice's transaction history. If the invoice has no transaction history
+            (sender address unknown), the request will fail with an error.
+          example: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
+        include_transactions:
+          type: boolean
+          default: false
+          description: Include transaction history in response
+
+    Refund:
+      type: object
+      required:
+        - id
+        - invoice_id
+        - amount
+        - asset
+        - source_address
+        - destination_address
+        - status
+        - initiator_type
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Refund UUID
+          example: "11111111-2222-3333-4444-555555555555"
+        invoice_id:
+          type: string
+          format: uuid
+          description: Associated invoice UUID
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        amount:
+          type: string
+          pattern: '^\d+(\.\d+)?$'
+          description: Refund amount
+          example: "10.00"
+        asset:
+          type: string
+          description: Asset symbol (e.g., USDC, USDT, DOT)
+          example: "USDC"
+        source_address:
+          type: string
+          description: Address funds are sent from (payment or reserve account)
+          example: "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
+        destination_address:
+          type: string
+          description: Customer's address receiving the refund
+          example: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
+        status:
+          $ref: '#/components/schemas/RefundStatus'
+        initiator_type:
+          type: string
+          enum: [system, admin]
+          description: Who initiated the refund
+          example: "admin"
+        transactions:
+          type: array
+          items:
+            $ref: '#/components/schemas/Transaction'
+          description: |
+            Optional list of refund transactions (outgoing transfers).
+            Only included when `include_transactions=true` is requested (query parameter for GET, request body field for POST).
+            Shows only the outgoing refund transaction, not the original invoice payment.
+        created_at:
+          type: string
+          format: date-time
+          description: Refund creation timestamp
+          example: "2025-11-14T13:00:00.000Z"
+        updated_at:
+          type: string
+          format: date-time
+          description: Last update timestamp
+          example: "2025-11-14T13:05:00.000Z"
+
+    CartItem:
+      type: object
+      required:
+        - name
+        - quantity
+        - price
+      properties:
+        name:
+          type: string
+          maxLength: 255
+          minLength: 1
+          description: Item name
+          example: "Premium Widget"
+        quantity:
+          type: integer
+          minimum: 1
+          description: Item quantity
+          example: 2
+        price:
+          type: string
+          pattern: '^\d+(\.\d+)?$'
+          description: Unit price (decimal string). Zero-price items are allowed.
+          example: "45.00"
+        sku:
+          type: string
+          maxLength: 255
+          description: Optional SKU (Stock Keeping Unit) identifier
+          example: "WGT-PREM-001"
+        product_id:
+          type: string
+          maxLength: 255
+          description: Optional product identifier from e-commerce platform
+          example: "prod_abc123"
+        variant_id:
+          type: string
+          maxLength: 255
+          description: Optional product variant identifier (e.g., size, color)
+          example: "var_blue_large"
+        image_url:
+          type: string
+          format: uri
+          maxLength: 2048
+          description: Optional product image URL for display on payment page
+          example: "https://myshop.com/images/premium-widget.jpg"
+        tax:
+          type: string
+          pattern: '^\d+(\.\d+)?$'
+          description: Optional tax amount for this line item
+          example: "2.50"
+        discount:
+          type: string
+          pattern: '^\d+(\.\d+)?$'
+          description: Optional discount amount applied to this line item
+          example: "5.00"
+
+    InvoiceStatus:
+      type: string
+      enum:
+        - waiting
+        - partially_paid
+        - paid
+        - overpaid
+        - admin_approved
+        - unpaid_expired
+        - partially_paid_expired
+        - customer_canceled
+        - admin_canceled
+      description: |
+        Invoice payment status:
+        - `waiting` - Awaiting payment
+        - `partially_paid` - Received payment less than amount. Customer can send additional payments to same address.
+        - `paid` - Received payment equal to amount. Funds withdrawn to merchant.
+        - `overpaid` - Received more than amount. Invoice amount withdrawn, excess refunded automatically.
+        - `admin_approved` - Manually approved regardless of payment amount
+        - `unpaid_expired` - Expired without any payment
+        - `partially_paid_expired` - Expired with partial payment (refundable)
+        - `customer_canceled` - Canceled by customer action
+        - `admin_canceled` - Canceled by merchant/admin. Partial payments refunded automatically.
+
+    RefundStatus:
+      type: string
+      enum:
+        - waiting
+        - in_progress
+        - completed
+        - failed
+      description: |
+        Refund status:
+        - `waiting` - Created but not yet sent
+        - `in_progress` - Sent to blockchain, awaiting confirmation
+        - `completed` - Confirmed on-chain
+        - `failed` - Transaction failed
+
+    Transaction:
+      type: object
+      required:
+        - id
+        - tx_hash
+        - block_number
+        - amount
+        - timestamp
+        - status
+        - sender_address
+        - recipient_address
+        - transaction_link
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique transaction identifier
+          example: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        tx_hash:
+          type: string
+          description: Blockchain transaction hash
+          example: "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+        block_number:
+          type: integer
+          description: Block number where transaction was included
+          example: 1234567
+        amount:
+          type: string
+          pattern: '^\d+(\.\d+)?$'
+          description: Transaction amount (decimal string for precision)
+          example: "100.50"
+        sender_address:
+          type: string
+          description: Address that sent the payment (Substrate ss58 format)
+          example: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
+        recipient_address:
+          type: string
+          description: Payment address that received the funds (invoice payment address, Substrate ss58 format)
+          example: "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
+        timestamp:
+          type: string
+          format: date-time
+          description: Transaction timestamp
+          example: "2025-11-14T12:10:00.000Z"
+        status:
+          type: string
+          enum:
+            - Waiting
+            - InProgress
+            - Completed
+            - Failed
+          description: |
+            Transaction processing status:
+            - `Waiting` - Transaction created but not yet submitted to blockchain
+            - `InProgress` - Transaction submitted and awaiting finalization
+            - `Completed` - Transaction finalized on blockchain
+            - `Failed` - Transaction failed to complete
+          example: "Completed"
+        transaction_link:
+          type: string
+          format: uri
+          description: |
+            Link to blockchain explorer (subscan.io) for this transaction.
+            The subdomain depends on the configured chain (e.g., assethub-polkadot, assethub-kusama).
+          example: "https://assethub-polkadot.subscan.io/extrinsic/0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+
+    Error:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          required:
+            - type
+            - code
+            - message
+          properties:
+            type:
+              type: string
+              enum:
+                - authentication_error
+                - invalid_request_error
+                - api_error
+                - idempotency_error
+              description: Error category
+            code:
+              type: string
+              description: Machine-readable error code
+              example: "amount_too_low"
+            message:
+              type: string
+              description: Human-readable error message
+              example: "Amount must be at least 0.07 USDC"
+            param:
+              type: string
+              description: The parameter that caused the error (if applicable)
+              example: "amount"
+            details:
+              type: object
+              description: Additional error context (optional)
+              additionalProperties: true
+            validation_errors:
+              type: array
+              description: Multiple validation errors (if applicable)
+              items:
+                type: object
+                required:
+                  - param
+                  - message
+                properties:
+                  param:
+                    type: string
+                    description: Parameter name
+                  message:
+                    type: string
+                    description: Validation error message
+
+  responses:
+    UnauthorizedError:
+      description: Authentication failed - invalid or missing signature
+      headers:
+        X-Request-Id:
+          schema:
+            type: string
+          description: Unique request identifier for debugging
+          example: "req_auth1"
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            invalid_signature:
+              summary: Invalid signature
+              value:
+                error:
+                  type: "authentication_error"
+                  code: "invalid_signature"
+                  message: "HMAC signature verification failed"
+            timestamp_expired:
+              summary: Timestamp too old
+              value:
+                error:
+                  type: "authentication_error"
+                  code: "timestamp_expired"
+                  message: "Request timestamp is outside the allowed window (±5 minutes)"
+
+    ServerError:
+      description: Internal server error
+      headers:
+        X-Request-Id:
+          schema:
+            type: string
+          description: Unique request identifier for debugging
+          example: "req_server1"
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              type: "api_error"
+              code: "internal_server_error"
+              message: "An internal server error occurred. Please try again later or contact support with X-Request-Id header."

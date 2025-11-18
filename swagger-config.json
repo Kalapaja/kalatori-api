@@ -1,1 +1,1 @@
-{"url":"kalatori.yaml","deepLinking":true}
+{"urls":[{"url": "kalatori.yaml", "name": "API V2 (Released)"}, {"url": "kalatori-merchant-api-v3.yaml", "name": "API V3 (WIP)"}],"deepLinking":true}
