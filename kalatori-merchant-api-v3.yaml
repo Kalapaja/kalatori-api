@@ -18,7 +18,7 @@ info:
 
     ## Authentication
 
-    All API requests require HMAC-SHA256 signature authentication using two headers:
+    All API requests to `/private` handlers require HMAC-SHA256 signature authentication using two headers:
 
     ```
     X-Kalatori-Signature: <hmac_sha256_hex_signature>
@@ -37,7 +37,7 @@ info:
     **Components:**
 
     - `HTTP_METHOD` = Request method in uppercase (e.g., "GET", "POST", "PATCH")
-    - `URL` = Full path without query string (e.g., "/v3/invoice/get")
+    - `URL` = Full path without query string (e.g., "/private/v3/invoice/get")
     - `body_or_query` = Either:
       - For POST/PATCH: Raw JSON request body as string
       - For GET: Query parameters sorted alphabetically by key (e.g., "amount=100.00&order_id=order-123"), or empty string if no parameters
@@ -56,13 +56,13 @@ info:
     **Example (POST with body):**
     ```javascript
     const method = "POST";
-    const url = "/v3/invoice/create";
+    const url = "/private/v3/invoice/create";
     const body = '{"order_id":"order-123","amount":"100.00"}';
     const timestamp = "1731585330";
 
     // Concatenate components with newline delimiters
     const signedPayload = method + "\n" + url + "\n" + body + "\n" + timestamp;
-    // Result: "POST\n/v3/invoice/create\n{\"order_id\":\"order-123\",\"amount\":\"100.00\"}\n1731585330"
+    // Result: "POST\n/private/v3/invoice/create\n{\"order_id\":\"order-123\",\"amount\":\"100.00\"}\n1731585330"
 
     const signature = hmac_sha256(secret, signedPayload);
     ```
@@ -70,14 +70,14 @@ info:
     **Example (GET with query parameters):**
     ```javascript
     const method = "GET";
-    const url = "/v3/invoice/get";
+    const url = "/private/v3/invoice/get";
     // Note: parameters sorted alphabetically by key, without '?' prefix
     const queryString = "include_transactions=true&invoice_id=a1b2c3d4-e5f6-7890";
     const timestamp = "1731585330";
 
     // Concatenate components with newline delimiters
     const signedPayload = method + "\n" + url + "\n" + queryString + "\n" + timestamp;
-    // Result: "GET\n/v3/invoice/get\ninclude_transactions=true&invoice_id=a1b2c3d4-e5f6-7890\n1731585330"
+    // Result: "GET\n/private/v3/invoice/get\ninclude_transactions=true&invoice_id=a1b2c3d4-e5f6-7890\n1731585330"
 
     const signature = hmac_sha256(secret, signedPayload);
     ```
@@ -85,13 +85,13 @@ info:
     **Example (GET without query parameters):**
     ```javascript
     const method = "GET";
-    const url = "/v3/some/endpoint";
+    const url = "/private/v3/some/endpoint";
     const queryString = ""; // No parameters
     const timestamp = "1731585330";
 
     // Concatenate components with newline delimiters
     const signedPayload = method + "\n" + url + "\n" + queryString + "\n" + timestamp;
-    // Result: "GET\n/v3/some/endpoint\n\n1731585330"
+    // Result: "GET\n/private/v3/some/endpoint\n\n1731585330"
 
     const signature = hmac_sha256(secret, signedPayload);
     ```
@@ -240,11 +240,11 @@ security:
 tags:
   - name: Invoices
     description: Invoice creation, retrieval, and management operations
-  - name: Transactions
-    description: Transaction retrieval and monitoring operations
+  - name: Public
+    description: Public endpoints for serving payment pages and serving public invoice details
 
 paths:
-  /v3/invoice/get:
+  /private/v3/invoice/get:
     get:
       tags:
         - Invoices
@@ -377,7 +377,7 @@ paths:
         '500':
           $ref: '#/components/responses/ServerError'
 
-  /v3/invoice/create:
+  /private/v3/invoice/create:
     post:
       tags:
         - Invoices
@@ -511,7 +511,7 @@ paths:
         '500':
           $ref: '#/components/responses/ServerError'
 
-  /v3/invoice/update:
+  /private/v3/invoice/update:
     post:
       tags:
         - Invoices
@@ -580,7 +580,7 @@ paths:
         '500':
           $ref: '#/components/responses/ServerError'
 
-  /v3/invoice/cancel:
+  /private/v3/invoice/cancel:
     post:
       tags:
         - Invoices
@@ -668,6 +668,76 @@ paths:
                 $ref: '#/components/schemas/Error'
         '500':
           $ref: '#/components/responses/ServerError'
+  /public:
+    get:
+      tags:
+        - Public
+      summary: Serve front-end payment page
+      description: |
+        Serve the Kalatori-hosted payment page for customers to complete payment using wallet integrations.
+        URL to this page is provided in the `payment_url` field of the `Invoice`.
+      operationId: servePaymentPage
+      parameters:
+        - name: invoice_id
+          in: query
+          description: The Kalatori-generated invoice UUID
+          required: true
+          schema:
+            type: string
+            format: uuid
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+      responses:
+        '200':
+          description: Payment page HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /public/invoice:
+    get:
+      tags:
+        - Public
+      summary: Get public invoice details
+      description: |
+        Retrieve public invoice details for displaying on the payment page.
+
+        **Note:** This endpoint will only return 200 OK if the invoice exists and is in `Waiting` or `PartiallyPaid` status.
+        If the invoice is `Paid`, `AdminCanceled` or any other status, a 404 Not Found response will be returned.
+      operationId: getPublicInvoice
+      parameters:
+        - name: invoice_id
+          in: query
+          description: The Kalatori-generated invoice UUID
+          required: true
+          schema:
+            type: string
+            format: uuid
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+      responses:
+        '200':
+          description: Public invoice details retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - result
+                properties:
+                  result:
+                    $ref: '#/components/schemas/Invoice'
+        '400':
+          description: Invalid request parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Invoice not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 
 components:
   securitySchemes:
@@ -693,7 +763,7 @@ components:
 
         **Components:**
         - `HTTP_METHOD` = Request method in uppercase (e.g., "GET", "POST", "PATCH")
-        - `URL` = Full path without query string (e.g., "/v3/invoice/get")
+        - `URL` = Full path without query string (e.g., "/private/v3/invoice/get")
         - `body_or_query` = Either:
           - For POST/PATCH: Raw JSON request body as string
           - For GET: Query parameters sorted alphabetically by key (e.g., "amount=100.00&order_id=order-123"), or empty string if no parameters
