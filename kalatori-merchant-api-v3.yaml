@@ -213,14 +213,17 @@ info:
     - `X-Kalatori-Timestamp`: Unix timestamp in seconds (integer)
 
     **Verification:**
-    - Verify timestamp is within ±5 minutes to prevent replay attacks
+    - Verify timestamp is not older than 5 minutes of server time
     - Use constant-time comparison for signature verification
 
     **Webhook Events:**
-    - `invoice.created`, `invoice.partially_paid`
-    - `invoice.paid`, `invoice.overpaid`
-    - `invoice.unpaid_expired`, `invoice.partially_paid_expired`
-    - `invoice.customer_canceled`, `invoice.admin_canceled`
+    - `invoice.created`
+    - `invoice.updated`
+    - `invoice.partially_paid`
+    - `invoice.paid`
+    - `invoice.expired`
+    - `invoice.customer_canceled`
+    - `invoice.admin_canceled
   contact:
     name: Kalatori Support
     url: https://github.com/Kalapaja/kalatori
@@ -293,7 +296,7 @@ paths:
                       id: "01234567-89ab-cdef-0123-456789abcdef"
                       order_id: "shop-order-12345"
                       amount: "100.50"
-                      asset: "USDC"
+                      asset_name: "USDC"
                       asset_id: "1337"
                       chain: "Polkadot Asset Hub"
                       status: "Waiting"
@@ -319,7 +322,7 @@ paths:
                       id: "01234567-89ab-cdef-0123-456789abcdef"
                       order_id: "shop-order-12345"
                       amount: "100.50"
-                      asset: "USDC"
+                      asset_name: "USDC"
                       asset_id: "1337"
                       chain: "Polkadot Asset Hub"
                       status: "Paid"
@@ -406,6 +409,7 @@ paths:
                 value:
                   order_id: "shop-order-12346"
                   amount: "250.00"
+                  redirect_url: "https://myshop.com/thank-you/shop-order-12346"
                   cart:
                     - name: "Premium Widget"
                       quantity: 2
@@ -440,7 +444,7 @@ paths:
                   id: "01234567-89ab-cdef-0123-456789abcdef"
                   order_id: "shop-order-12345"
                   amount: "100.50"
-                  asset: "USDC"
+                  asset_name: "USDC"
                   asset_id: "1337"
                   chain: "Polkadot Asset Hub"
                   status: "Waiting"
@@ -600,7 +604,6 @@ paths:
               $ref: '#/components/schemas/CancelInvoiceRequest'
             example:
               invoice_id: "01234567-89ab-cdef-0123-456789abcdef"
-              reason: "customer_request"
       responses:
         '200':
           description: Invoice canceled successfully
@@ -623,7 +626,7 @@ paths:
                   order_id: "shop-order-12345"
                   status: "AdminCanceled"
                   amount: "100.50"
-                  asset: "USDC"
+                  asset_name: "USDC"
                   asset_id: "1337"
                   chain: "Polkadot Asset Hub"
                   payment_address: "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
@@ -786,7 +789,7 @@ components:
       required:
         - id
         - order_id
-        - asset
+        - asset_name
         - asset_id
         - chain
         - amount
@@ -810,7 +813,7 @@ components:
           maxLength: 255
           description: Merchant's order identifier
           example: "shop-order-12345"
-        asset:
+        asset_name:
           type: string
           description: Asset symbol (e.g., USDC, USDT, DOT)
           example: "USDC"
@@ -903,6 +906,11 @@ components:
           pattern: '^\d+(\.\d+)?$'
           description: Payment amount (must be >= existential deposit)
           example: "100.50"
+        redirect_url:
+          type: string
+          maxLength: 255
+          minLength: 1
+          description: "thank you" page URL to which user will be redirected after payment
         cart:
           type: array
           items:
@@ -923,6 +931,7 @@ components:
       type: object
       required:
         - invoice_id
+        - amount
       properties:
         invoice_id:
           type: string
@@ -954,11 +963,6 @@ components:
           format: uuid
           description: Invoice UUID to cancel
           example: "01234567-89ab-cdef-0123-456789abcdef"
-        reason:
-          type: string
-          maxLength: 500
-          description: Optional cancellation reason
-          example: "customer_request"
         include_transactions:
           type: boolean
           default: false
@@ -1015,7 +1019,7 @@ components:
         - Waiting
         - PartiallyPaid
         - Paid
-        - Overpaid
+        - OverPaid
         - UnpaidExpired
         - PartiallyPaidExpired
         - CustomerCanceled
@@ -1025,7 +1029,7 @@ components:
         - `Waiting` - Awaiting payment
         - `PartiallyPaid` - Received payment less than amount. Customer can send additional payments to same address.
         - `Paid` - Received payment equal to amount. Funds withdrawn to merchant.
-        - `Overpaid` - Received more than amount. Invoice amount withdrawn, excess refunded automatically.
+        - `OverPaid` - Received more than amount. Invoice amount withdrawn, excess refunded automatically.
         - `UnpaidExpired` - Expired without any payment
         - `PartiallyPaidExpired` - Expired with partial payment (refundable)
         - `CustomerCanceled` - Canceled by customer action
@@ -1040,7 +1044,7 @@ components:
         - position_in_block
         - tx_hash
         - transaction_type
-        - asset
+        - asset_name
         - asset_id
         - chain
         - amount
@@ -1083,7 +1087,7 @@ components:
             - `Incoming` - Payment received to invoice address
             - `Outgoing` - Refund or settlement sent from invoice address
           example: "Incoming"
-        asset:
+        asset_name:
           type: string
           description: Asset symbol (e.g., USDC, USDT, DOT)
           example: "USDC"
@@ -1152,7 +1156,7 @@ components:
             - code
             - message
           properties:
-            type:
+            category:
               type: string
               enum:
                 - authentication_error
@@ -1167,29 +1171,10 @@ components:
               type: string
               description: Human-readable error message
               example: "Amount must be at least 0.07 USDC"
-            param:
-              type: string
-              description: The parameter that caused the error (if applicable)
-              example: "amount"
             details:
               type: object
               description: Additional error context (optional)
               additionalProperties: true
-            validation_errors:
-              type: array
-              description: Multiple validation errors (if applicable)
-              items:
-                type: object
-                required:
-                  - param
-                  - message
-                properties:
-                  param:
-                    type: string
-                    description: Parameter name
-                  message:
-                    type: string
-                    description: Validation error message
 
   responses:
     UnauthorizedError:
@@ -1209,14 +1194,14 @@ components:
               summary: Invalid signature
               value:
                 error:
-                  type: "authentication_error"
+                  category: "authentication_error"
                   code: "invalid_signature"
                   message: "HMAC signature verification failed"
             timestamp_expired:
               summary: Timestamp too old
               value:
                 error:
-                  type: "authentication_error"
+                  category: "authentication_error"
                   code: "timestamp_expired"
                   message: "Request timestamp is outside the allowed window (±5 minutes)"
 
@@ -1234,6 +1219,6 @@ components:
             $ref: '#/components/schemas/Error'
           example:
             error:
-              type: "api_error"
+              category: "api_error"
               code: "internal_server_error"
               message: "An internal server error occurred. Please try again later or contact support with X-Request-Id header."
