@@ -910,7 +910,7 @@ components:
           type: string
           maxLength: 255
           minLength: 1
-          description: "thank you" page URL to which user will be redirected after payment
+          description: thank you page URL to which user will be redirected after payment
         cart:
           type: array
           items:
