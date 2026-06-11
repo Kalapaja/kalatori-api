@@ -937,8 +937,10 @@ components:
           additionalProperties: true
           description: |
             Optional opaque metadata stored with the invoice and echoed back verbatim
-            in API responses and webhook payloads. Maximum serialized size: 8192 bytes
-            (larger values are rejected with `INVOICE_METADATA_TOO_LARGE`).
+            in private API responses and webhook payloads (never on the public
+            payment-page endpoint). Must be a JSON object. Maximum serialized size:
+            8192 bytes (larger values are rejected with `INVOICE_METADATA_TOO_LARGE`;
+            non-object values with `INVOICE_METADATA_NOT_OBJECT`).
         include_transactions:
           type: boolean
           default: false
@@ -975,9 +977,11 @@ components:
           type: object
           additionalProperties: true
           description: |
-            Replaces the stored metadata, mirroring `cart` semantics: omitting the
-            field clears previously stored metadata. Maximum serialized size: 8192
-            bytes (larger values are rejected with `INVOICE_METADATA_TOO_LARGE`).
+            Replaces the stored metadata when provided. Unlike `cart`, metadata is
+            *sticky*: omitting the field on update KEEPS the previously stored value
+            (it is intended as a stable correlation token). Maximum serialized size:
+            8192 bytes (larger values are rejected with `INVOICE_METADATA_TOO_LARGE`;
+            non-object values with `INVOICE_METADATA_NOT_OBJECT`).
         include_transactions:
           type: boolean
           default: false
@@ -1182,25 +1186,26 @@ components:
         error:
           type: object
           required:
-            - type
             - code
             - message
           properties:
             category:
               type: string
-              enum:
-                - authentication_error
-                - invalid_request_error
-                - api_error
-              description: Error category
+              description: |
+                Coarse error category, returned by the daemon as a SCREAMING_SNAKE
+                string (e.g. `VALIDATION_ERROR`, `ENTITY_NOT_FOUND`,
+                `DUPLICATE_ENTITY`, `AUTHENTICATION_ERROR`, `INTERNAL_SERVER_ERROR`).
+                Dispatch on `code`, not this. Free-form to allow new categories
+                without a breaking spec change.
+              example: "VALIDATION_ERROR"
             code:
               type: string
               description: Machine-readable error code
-              example: "amount_too_low"
+              example: "INVOICE_METADATA_TOO_LARGE"
             message:
               type: string
               description: Human-readable error message
-              example: "Amount must be at least 0.07 USDC"
+              example: "Invoice metadata is too large."
             details:
               type: object
               description: Additional error context (optional)
