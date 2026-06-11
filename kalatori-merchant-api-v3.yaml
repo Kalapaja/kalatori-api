@@ -480,6 +480,13 @@ paths:
                       code: "amount_too_low"
                       message: "Amount must be at least 0.07 USDC to cover existential deposit"
                       param: "amount"
+                metadata_too_large:
+                  summary: Metadata exceeds the 8192-byte serialized size limit
+                  value:
+                    error:
+                      category: "VALIDATION_ERROR"
+                      code: "INVOICE_METADATA_TOO_LARGE"
+                      message: "Invoice metadata is too large."
                 validation_failed:
                   summary: Multiple validation errors
                   value:
@@ -865,6 +872,15 @@ components:
           items:
             $ref: '#/components/schemas/CartItem'
           description: Optional cart items for display on payment page
+        metadata:
+          type: object
+          additionalProperties: true
+          description: |
+            Optional opaque merchant-provided metadata, stored verbatim and echoed
+            back in API responses and webhook payloads. Never interpreted by Kalatori.
+            Maximum serialized size: 8192 bytes. Absent when not provided.
+          example:
+            external_ref: "platform-order-42"
         total_received_amount:
           type: string
           pattern: '^\d+(\.\d+)?$'
@@ -916,6 +932,13 @@ components:
           items:
             $ref: '#/components/schemas/CartItem'
           description: Optional cart items for payment page display
+        metadata:
+          type: object
+          additionalProperties: true
+          description: |
+            Optional opaque metadata stored with the invoice and echoed back verbatim
+            in API responses and webhook payloads. Maximum serialized size: 8192 bytes
+            (larger values are rejected with `INVOICE_METADATA_TOO_LARGE`).
         include_transactions:
           type: boolean
           default: false
@@ -948,6 +971,13 @@ components:
           items:
             $ref: '#/components/schemas/CartItem'
           description: Updated cart items
+        metadata:
+          type: object
+          additionalProperties: true
+          description: |
+            Replaces the stored metadata, mirroring `cart` semantics: omitting the
+            field clears previously stored metadata. Maximum serialized size: 8192
+            bytes (larger values are rejected with `INVOICE_METADATA_TOO_LARGE`).
         include_transactions:
           type: boolean
           default: false
