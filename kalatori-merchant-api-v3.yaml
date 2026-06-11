@@ -129,7 +129,7 @@ info:
     **Enum Values:**
     - Status values use PascalCase: `"Waiting"`, `"Paid"`, `"PartiallyPaid"`, `"AdminCanceled"`
     - Transaction types use PascalCase: `"Incoming"`, `"Outgoing"`
-    - Error types use snake_case: `"authentication_error"`, `"invalid_request_error"`
+    - Error categories and codes use SCREAMING_SNAKE_CASE: `"AUTHENTICATION_FAILED"`, `"INVOICE_NOT_FOUND"`
     - Webhook events use snake_case with dot notation: `"invoice.paid"`, `"invoice.admin_canceled"`
 
     **Character Encoding:**
@@ -158,10 +158,10 @@ info:
 
     {
       "error": {
-        "type": "error_type",
-        "code": "error_code",
+        "category": "ERROR_CATEGORY",
+        "code": "ERROR_CODE",
         "message": "Human-readable error message",
-        "param": "parameter_name"
+        "details": { /* optional, additional context */ }
       }
     }
     ```
@@ -352,17 +352,16 @@ paths:
                   summary: Missing required parameter
                   value:
                     error:
-                      type: "invalid_request_error"
-                      code: "missing_parameter"
-                      message: "invoice_id must be provided"
+                      category: "INVALID_REQUEST"
+                      code: "INVALID_QUERY_PARAMS"
+                      message: "Query extraction error: missing field `invoice_id`"
                 invalid_uuid:
                   summary: Malformed UUID
                   value:
                     error:
-                      type: "invalid_request_error"
-                      code: "invalid_parameter"
-                      message: "invoice_id must be a valid UUID"
-                      param: "invoice_id"
+                      category: "INVALID_REQUEST"
+                      code: "INVALID_QUERY_PARAMS"
+                      message: "Query extraction error: invoice_id must be a valid UUID"
         '401':
           $ref: '#/components/responses/UnauthorizedError'
         '404':
@@ -373,10 +372,9 @@ paths:
                 $ref: '#/components/schemas/Error'
               example:
                 error:
-                  type: "invalid_request_error"
-                  code: "invoice_not_found"
-                  message: "No invoice found with the provided ID"
-                  param: "invoice_id"
+                  category: "ENTITY_NOT_FOUND"
+                  code: "INVOICE_NOT_FOUND"
+                  message: "The requested invoice was not found."
         '500':
           $ref: '#/components/responses/ServerError'
 
@@ -472,14 +470,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
               examples:
-                amount_too_low:
-                  summary: Amount below existential deposit
+                invalid_json:
+                  summary: Malformed or incomplete request body
                   value:
                     error:
-                      type: "invalid_request_error"
-                      code: "amount_too_low"
-                      message: "Amount must be at least 0.07 USDC to cover existential deposit"
-                      param: "amount"
+                      category: "INVALID_REQUEST"
+                      code: "INVALID_JSON"
+                      message: "JSON extraction error: missing field `amount`"
                 metadata_too_large:
                   summary: Metadata exceeds the 8192-byte serialized size limit
                   value:
@@ -487,18 +484,13 @@ paths:
                       category: "VALIDATION_ERROR"
                       code: "INVOICE_METADATA_TOO_LARGE"
                       message: "Invoice metadata is too large."
-                validation_failed:
-                  summary: Multiple validation errors
+                metadata_not_object:
+                  summary: Metadata is not a JSON object
                   value:
                     error:
-                      type: "invalid_request_error"
-                      code: "validation_failed"
-                      message: "Request validation failed"
-                      validation_errors:
-                        - param: "order_id"
-                          message: "order_id cannot be empty"
-                        - param: "amount"
-                          message: "amount must be a positive number"
+                      category: "VALIDATION_ERROR"
+                      code: "INVOICE_METADATA_NOT_OBJECT"
+                      message: "Invoice metadata must be a JSON object."
         '401':
           $ref: '#/components/responses/UnauthorizedError'
         '409':
@@ -512,13 +504,9 @@ paths:
                   summary: Order ID already exists
                   value:
                     error:
-                      type: "invalid_request_error"
-                      code: "duplicate_order_id"
-                      message: "An invoice with order_id 'shop-order-12345' already exists"
-                      param: "order_id"
-                      details:
-                        existing_invoice_id: "fedcba98-7654-3210-fedc-ba9876543210"
-                        existing_status: "Waiting"
+                      category: "DUPLICATE_ENTITY"
+                      code: "INVOICE_DUPLICATE_ORDER_ID"
+                      message: "An invoice with the specified order ID already exists."
         '500':
           $ref: '#/components/responses/ServerError'
 
@@ -566,7 +554,23 @@ paths:
                   result:
                     $ref: '#/components/schemas/Invoice'
         '400':
-          description: Invalid request or invoice cannot be updated
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                metadata_too_large:
+                  summary: Metadata exceeds the 8192-byte serialized size limit
+                  value:
+                    error:
+                      category: "VALIDATION_ERROR"
+                      code: "INVOICE_METADATA_TOO_LARGE"
+                      message: "Invoice metadata is too large."
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '409':
+          description: Invoice cannot be updated in its current status
           content:
             application/json:
               schema:
@@ -576,12 +580,9 @@ paths:
                   summary: Invoice not in waiting status
                   value:
                     error:
-                      type: "invalid_request_error"
-                      code: "invalid_invoice_status"
-                      message: "Only invoices with 'Waiting' status can be updated. Current status: Paid"
-                      param: "invoice_id"
-        '401':
-          $ref: '#/components/responses/UnauthorizedError'
+                      category: "UPDATE_NOT_ALLOWED"
+                      code: "INVOICE_UPDATE_NOT_ALLOWED"
+                      message: "Invoice cannot be updated in its current status."
         '404':
           description: Invoice not found
           content:
@@ -656,18 +657,16 @@ paths:
                   summary: Invoice already paid
                   value:
                     error:
-                      type: "invalid_request_error"
-                      code: "invalid_invoice_status"
-                      message: "Cannot cancel invoice with status 'paid'"
-                      param: "invoice_id"
+                      category: "STATUS_CONSTRAINT_VIOLATION"
+                      code: "INVOICE_STATUS_CONSTRAINT_VIOLATION"
+                      message: "The requested status transition is not allowed."
                 already_canceled:
                   summary: Invoice already canceled
                   value:
                     error:
-                      type: "invalid_request_error"
-                      code: "invalid_invoice_status"
-                      message: "Invoice is already canceled"
-                      param: "invoice_id"
+                      category: "STATUS_CONSTRAINT_VIOLATION"
+                      code: "INVOICE_STATUS_CONSTRAINT_VIOLATION"
+                      message: "The requested status transition is not allowed."
         '401':
           $ref: '#/components/responses/UnauthorizedError'
         '404':
@@ -714,6 +713,10 @@ paths:
 
         **Note:** This endpoint will only return 200 OK if the invoice exists and is in `Waiting` or `PartiallyPaid` status.
         If the invoice is `Paid`, `AdminCanceled` or any other status, a 404 Not Found response will be returned.
+
+        **Note:** The `metadata` field is merchant-private and is always omitted from
+        this endpoint's responses, even when set on the invoice. It is only returned
+        on `/private` endpoints and in webhook payloads.
       operationId: getPublicInvoice
       parameters:
         - name: invoice_id
@@ -1225,20 +1228,27 @@ components:
           schema:
             $ref: '#/components/schemas/Error'
           examples:
+            missing_signature:
+              summary: Signature header not set
+              value:
+                error:
+                  category: "INVALID_REQUEST"
+                  code: "SIGNATURE_HEADER_NOT_SET"
+                  message: "Header x-kalatori-signature should be set"
             invalid_signature:
               summary: Invalid signature
               value:
                 error:
-                  category: "authentication_error"
-                  code: "invalid_signature"
-                  message: "HMAC signature verification failed"
+                  category: "AUTHENTICATION_FAILED"
+                  code: "SIGNATURE_VERIFICATION_FAILED"
+                  message: "Signature verification failed"
             timestamp_expired:
               summary: Timestamp too old
               value:
                 error:
-                  category: "authentication_error"
-                  code: "timestamp_expired"
-                  message: "Request timestamp is outside the allowed window (±5 minutes)"
+                  category: "AUTHENTICATION_FAILED"
+                  code: "REQUEST_SIGNATURE_EXPIRED"
+                  message: "Request signature expired"
 
     ServerError:
       description: Internal server error
@@ -1254,6 +1264,6 @@ components:
             $ref: '#/components/schemas/Error'
           example:
             error:
-              category: "api_error"
-              code: "internal_server_error"
-              message: "An internal server error occurred. Please try again later or contact support with X-Request-Id header."
+              category: "INTERNAL_SERVER_ERROR"
+              code: "INTERNAL_SERVER_ERROR"
+              message: "A database error occurred."
